@@ -1,0 +1,6 @@
+{
+  "name": "air-travel-database",
+  "version": "1.0.0",
+  "description": "Air Travel Database web application - Honors Capstone",
+  "dependencies": ["crow"]
+}
