@@ -10,8 +10,8 @@ COPY . /app
 ENV VCPKG_ROOT=/usr/local/vcpkg
 ENV VCPKG_FEATURE_FLAGS=manifests
 
-# Install Crow via vcpkg so CMake find_package(Crow CONFIG REQUIRED) works
-RUN ${VCPKG_ROOT}/vcpkg install crow
+# Install dependencies declared in vcpkg.json (including Crow) in manifest mode
+RUN ${VCPKG_ROOT}/vcpkg install
 
 # Configure and build the C++ app in Release mode
 RUN mkdir -p build && cd build && \
