@@ -738,6 +738,16 @@ tr:hover { background: #e0f2fe; }
       var arr = d.airlines || [];
       if (arr.length === 0){ setInfoError('No airlines found.'); return; }
       var air = arr[0];
+      // If short code entered (like AA, 1E), prefer exact IATA match when multiple results
+      if (arr.length > 1 && q.length <= 3){
+        var qUpper = q.toUpperCase();
+        for (var i = 0; i < arr.length; i++){
+          if (((arr[i].iata || '')).toUpperCase() === qUpper){
+            air = arr[i];
+            break;
+          }
+        }
+      }
       var code = air.iata || q.toUpperCase().slice(0, 3);
       if (air.iata) code = air.iata;
       fetch('/api/airline_airports/' + encodeURIComponent(code)).then(function(r){ if(!r.ok)throw new Error(r.statusText||'Request failed'); return r.json(); }).then(function(d2){
