@@ -153,6 +153,53 @@ struct Database {
         return a.id;
     }
 
+    // Remove an airport by IATA and also remove any routes that touch it.
+    // Returns true if the airport existed. removed_routes_out is the number of routes removed.
+    bool remove_airport_by_iata(const std::string& code, int& removed_routes_out) {
+        removed_routes_out = 0;
+        auto it = airports_by_iata.find(code);
+        if (it == airports_by_iata.end()) return false;
+        int airport_id = it->second.id;
+        airports_by_iata.erase(it);
+        auto itId = airports_by_id.find(airport_id);
+        if (itId != airports_by_id.end()) {
+            airports_by_id.erase(itId);
+        }
+        // Remove from airports_by_icao
+        for (auto ico = airports_by_icao.begin(); ico != airports_by_icao.end(); ) {
+            auto& vec = ico->second;
+            vec.erase(std::remove_if(vec.begin(), vec.end(), [airport_id](const Airport& a){ return a.id == airport_id; }), vec.end());
+            if (vec.empty()) ico = airports_by_icao.erase(ico);
+            else ++ico;
+        }
+        // Remove routes where this airport is source or destination
+        auto oldSize = routes.size();
+        routes.erase(std::remove_if(routes.begin(), routes.end(), [airport_id](const Route& r){
+            return r.src_airport_id == airport_id || r.dest_airport_id == airport_id;
+        }), routes.end());
+        removed_routes_out = static_cast<int>(oldSize - routes.size());
+        return true;
+    }
+
+    // Redact selected fields on an airport identified by IATA.
+    // If a field flag is true, that field is set to "[REDACTED]".
+    bool redact_airport(const std::string& code, bool redact_name, bool redact_city, bool redact_country) {
+        auto it = airports_by_iata.find(code);
+        if (it == airports_by_iata.end()) return false;
+        Airport a = it->second;
+        if (redact_name) a.name = "[REDACTED]";
+        if (redact_city) a.city = "[REDACTED]";
+        if (redact_country) a.country = "[REDACTED]";
+        // Write back into maps
+        airports_by_iata[code] = a;
+        auto itId = airports_by_id.find(a.id);
+        if (itId != airports_by_id.end()) {
+            itId->second = a;
+        }
+        // airports_by_icao contains copies; we leave them as-is because they are not used for display
+        return true;
+    }
+
     bool load_airports() {
         std::string path = data_dir + "/airports.dat";
         std::ifstream f(path);
@@ -508,6 +555,20 @@ tr:hover { background: #e0f2fe; }
         <button type="button" id="op-report-airports-btn" class="btn btn-secondary">All Airports</button>
         <button type="button" id="op-getcode-btn" class="btn btn-secondary">Get Code</button>
       </div>
+      <div style="margin-top:0.5rem; font-size:0.8rem; color:#0f172a;">
+        <div style="margin-bottom:0.25rem; font-weight:600;">Admin – Airports (in-memory only)</div>
+        <div style="display:flex; flex-direction:column; gap:0.25rem;">
+          <input type="text" id="admin-airport-iata" placeholder="IATA (e.g. SFO)" style="font-size:0.8rem; padding:0.3rem 0.4rem;">
+          <input type="text" id="admin-airport-name" placeholder="Name" style="font-size:0.8rem; padding:0.3rem 0.4rem;">
+          <input type="text" id="admin-airport-city" placeholder="City" style="font-size:0.8rem; padding:0.3rem 0.4rem;">
+          <input type="text" id="admin-airport-country" placeholder="Country" style="font-size:0.8rem; padding:0.3rem 0.4rem;">
+          <div style="display:flex; gap:0.25rem; flex-wrap:wrap;">
+            <button type="button" id="admin-airport-save" class="btn btn-secondary" style="font-size:0.75rem; padding:0.2rem 0.5rem;">Save/Update</button>
+            <button type="button" id="admin-airport-delete" class="btn btn-secondary" style="font-size:0.75rem; padding:0.2rem 0.5rem;">Delete</button>
+            <button type="button" id="admin-airport-redact" class="btn btn-secondary" style="font-size:0.75rem; padding:0.2rem 0.5rem;">Redact name/city/country</button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
   <div id="one-page-map"></div>
@@ -852,6 +913,72 @@ tr:hover { background: #e0f2fe; }
       showModal('Get Code (2.4)', '<p class="error">' + esc(msg) + '</p>');
     });
   });
+  // Admin: in-memory airport add/update/delete/redact
+  function adminGetAirportFields(){
+    return {
+      iata: (document.getElementById('admin-airport-iata').value || '').trim().toUpperCase(),
+      name: (document.getElementById('admin-airport-name').value || '').trim(),
+      city: (document.getElementById('admin-airport-city').value || '').trim(),
+      country: (document.getElementById('admin-airport-country').value || '').trim()
+    };
+  }
+  var adminSaveBtn = document.getElementById('admin-airport-save');
+  if (adminSaveBtn){
+    adminSaveBtn.addEventListener('click', function(){
+      var f = adminGetAirportFields();
+      if (!f.iata){ setInfoError('Enter an IATA code first.'); return; }
+      fetch('/api/admin/airport', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(f)
+      }).then(function(r){ return r.json().then(function(d){ if(!r.ok) throw new Error((d&&d.error)||r.statusText||'Request failed'); return d; }); }).then(function(d){
+        var msg = 'Airport ' + esc(f.iata) + ' saved in memory.';
+        if (d && typeof d.removed_routes === 'number'){ msg += ' Routes touched: ' + d.removed_routes + '.'; }
+        setInfo('<p>' + msg + '</p>');
+      }).catch(function(e){
+        setInfoError(e && e.message ? e.message : 'Request failed.');
+      });
+    });
+  }
+  var adminDeleteBtn = document.getElementById('admin-airport-delete');
+  if (adminDeleteBtn){
+    adminDeleteBtn.addEventListener('click', function(){
+      var f = adminGetAirportFields();
+      if (!f.iata){ setInfoError('Enter an IATA code to delete.'); return; }
+      fetch('/api/admin/airport/' + encodeURIComponent(f.iata), { method: 'DELETE' }).then(function(r){
+        return r.json().then(function(d){ if(!r.ok) throw new Error((d&&d.error)||r.statusText||'Request failed'); return d; });
+      }).then(function(d){
+        var msg;
+        if (d && d.removed){
+          msg = 'Airport ' + esc(f.iata) + ' removed from memory. Removed routes: ' + (d.removed_routes||0) + '.';
+        } else {
+          msg = 'Airport ' + esc(f.iata) + ' not found in memory.';
+        }
+        setInfo('<p>' + msg + '</p>');
+      }).catch(function(e){
+        setInfoError(e && e.message ? e.message : 'Request failed.');
+      });
+    });
+  }
+  var adminRedactBtn = document.getElementById('admin-airport-redact');
+  if (adminRedactBtn){
+    adminRedactBtn.addEventListener('click', function(){
+      var f = adminGetAirportFields();
+      if (!f.iata){ setInfoError('Enter an IATA code to redact.'); return; }
+      fetch('/api/admin/airport/' + encodeURIComponent(f.iata) + '/redact', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: true, city: true, country: true })
+      }).then(function(r){
+        return r.json().then(function(d){ if(!r.ok) throw new Error((d&&d.error)||r.statusText||'Request failed'); return d; });
+      }).then(function(d){
+        var msg = (d && d.redacted) ? 'Airport ' + esc(f.iata) + ' redacted in memory.' : 'Airport ' + esc(f.iata) + ' not found.';
+        setInfo('<p>' + msg + '</p>');
+      }).catch(function(e){
+        setInfoError(e && e.message ? e.message : 'Request failed.');
+      });
+    });
+  }
   document.getElementById('op-upload-btn').addEventListener('click', function(){
     var fileInput = document.getElementById('op-upload-file');
     if (!fileInput || !fileInput.files || fileInput.files.length === 0){ setInfo('<p class="error">Choose a CSV file first.</p>'); return; }
@@ -1654,6 +1781,89 @@ tr:hover { background: #e0f2fe; }
             err["error"] = std::string(e.what());
             return crow::response(400, err);
         }
+    });
+
+    // ----- Admin APIs: in-memory airport add/update/delete/redact -----
+    CROW_ROUTE(app, "/api/admin/airport").methods(crow::HTTPMethod::Post)
+    ([&db](const crow::request& req){
+        try {
+            auto body = crow::json::load(req.body);
+            if (!body) {
+                crow::json::wvalue err;
+                err["error"] = "Invalid JSON body.";
+                return crow::response(400, err);
+            }
+            std::string iata = body["iata"].s();
+            if (iata.empty()) {
+                crow::json::wvalue err;
+                err["error"] = "IATA is required.";
+                return crow::response(400, err);
+            }
+            std::transform(iata.begin(), iata.end(), iata.begin(), ::toupper);
+            Airport a;
+            a.iata = iata;
+            if (body.has("name")) a.name = body["name"].s();
+            if (body.has("city")) a.city = body["city"].s();
+            if (body.has("country")) a.country = body["country"].s();
+            // Look for an existing airport to carry over lat/lon if not provided
+            auto existing = db->airport_by_iata(iata);
+            if (existing) {
+                a = *existing;
+                a.iata = iata;
+                if (body.has("name")) a.name = body["name"].s();
+                if (body.has("city")) a.city = body["city"].s();
+                if (body.has("country")) a.country = body["country"].s();
+            }
+            int id = db->add_airport(a);
+            crow::json::wvalue out;
+            out["id"] = id;
+            out["iata"] = a.iata;
+            out["name"] = a.name;
+            out["city"] = a.city;
+            out["country"] = a.country;
+            return crow::response(200, out);
+        } catch (const std::exception& e) {
+            crow::json::wvalue err;
+            err["error"] = std::string(e.what());
+            return crow::response(400, err);
+        }
+    });
+
+    CROW_ROUTE(app, "/api/admin/airport/<string>").methods(crow::HTTPMethod::Delete)
+    ([&db](const crow::request&, const std::string& code){
+        std::string iata = code;
+        std::transform(iata.begin(), iata.end(), iata.begin(), ::toupper);
+        int removed_routes = 0;
+        bool removed = db->remove_airport_by_iata(iata, removed_routes);
+        crow::json::wvalue out;
+        out["removed"] = removed;
+        out["removed_routes"] = removed_routes;
+        if (!removed) {
+            out["error"] = "Airport not found.";
+            return crow::response(404, out);
+        }
+        return crow::response(200, out);
+    });
+
+    CROW_ROUTE(app, "/api/admin/airport/<string>/redact").methods(crow::HTTPMethod::Post)
+    ([&db](const crow::request& req, const std::string& code){
+        std::string iata = code;
+        std::transform(iata.begin(), iata.end(), iata.begin(), ::toupper);
+        bool redact_name = true, redact_city = true, redact_country = true;
+        auto body = crow::json::load(req.body);
+        if (body) {
+            if (body.has("name")) redact_name = body["name"].b();
+            if (body.has("city")) redact_city = body["city"].b();
+            if (body.has("country")) redact_country = body["country"].b();
+        }
+        bool ok = db->redact_airport(iata, redact_name, redact_city, redact_country);
+        crow::json::wvalue out;
+        out["redacted"] = ok;
+        if (!ok) {
+            out["error"] = "Airport not found.";
+            return crow::response(404, out);
+        }
+        return crow::response(200, out);
     });
 
     // ----- API: Get Code (2.4) -----
