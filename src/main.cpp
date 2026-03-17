@@ -754,7 +754,19 @@ tr:hover { background: #e0f2fe; }
         html += '<h4 style="margin-top:0.75rem">Airports served (' + ports.length + ')</h4>';
         if (ports.length > MAX_MARKERS) html += '<p style="font-size:0.85rem;color:#64748b;">Showing first ' + MAX_MARKERS + ' on map.</p>';
         if (ports.length === 0) html += '<p>No route data for this airline.</p>';
-        else { html += '<table><thead><tr><th>IATA</th><th>Name</th><th># Routes</th></tr></thead><tbody>'; ports.slice(0, 30).forEach(function(a){ html += '<tr><td>' + esc(a.iata) + '</td><td>' + esc(a.name) + '</td><td>' + (a.routes_count!=null?a.routes_count:'') + '</td></tr>'; }); html += '</tbody></table>'; }
+        else {
+          html += '<table><thead><tr><th>IATA</th><th>Airport</th><th># Routes</th><th>Show routes</th></tr></thead><tbody>';
+          ports.slice(0, 30).forEach(function(a){
+            html += '<tr>';
+            html += '<td>' + esc(a.iata) + '</td>';
+            html += '<td>' + esc(a.name) + '</td>';
+            html += '<td>' + (a.routes_count!=null?a.routes_count:'') + '</td>';
+            html += '<td><button type="button" class="btn btn-secondary airline-routes-show" ' +
+                    'data-airline="' + esc(air.iata || '') + '" data-airport="' + esc(a.iata || '') + '">Show</button></td>';
+            html += '</tr>';
+          });
+          html += '</tbody></table>';
+        }
         setInfo(html);
       }).catch(function(){ setInfoError(); });
     }).catch(function(){ setInfoError(); });
@@ -979,6 +991,62 @@ tr:hover { background: #e0f2fe; }
       });
     });
   }
+  // Click handler for airline->airport "Show routes" buttons
+  document.addEventListener('click', function(e){
+    var target = e.target;
+    if (!target || !target.classList) return;
+    if (!target.classList.contains('airline-routes-show')) return;
+    var airline = (target.getAttribute('data-airline') || '').trim().toUpperCase();
+    var airport = (target.getAttribute('data-airport') || '').trim().toUpperCase();
+    if (!airline || !airport) return;
+    setInfoLoading();
+    clearMapOverlays();
+    fetch('/api/airline_routes/' + encodeURIComponent(airline) + '/' + encodeURIComponent(airport))
+      .then(function(r){
+        return r.json().then(function(d){
+          if (!r.ok) throw new Error((d && d.error) || r.statusText || 'Request failed');
+          return d;
+        });
+      })
+      .then(function(d){
+        var routes = (d && d.routes) ? d.routes : [];
+        var html = '<h4>Routes for airline ' + esc(airline) + ' touching ' + esc(airport) + '</h4>';
+        if (routes.length === 0){
+          html += '<p>No individual routes found.</p>';
+          setInfo(html);
+          return;
+        }
+        html += '<table><thead><tr><th>From</th><th>To</th><th>Stops</th><th>Codeshare</th></tr></thead><tbody>';
+        var boundsPoints = [];
+        routes.forEach(function(r){
+          var src = r.src || '';
+          var dest = r.dest || '';
+          html += '<tr><td>' + esc(src) + '</td><td>' + esc(dest) + '</td><td>' +
+                  (r.stops!=null?r.stops:'') + '</td><td>' + esc(r.codeshare||'') + '</td></tr>';
+          if (r.src_lat != null && r.src_lon != null && r.dest_lat != null && r.dest_lon != null){
+            var fromLat = parseFloat(r.src_lat), fromLon = parseFloat(r.src_lon);
+            var toLat = parseFloat(r.dest_lat), toLon = parseFloat(r.dest_lon);
+            if (!isNaN(fromLat) && !isNaN(fromLon) && !isNaN(toLat) && !isNaN(toLon)){
+              // Add airplane markers at endpoints, same visual language as other route views
+              addMarker(fromLat, fromLon, src || ('From ' + airline));
+              addMarker(toLat, toLon, dest || ('To ' + airline));
+              var seg = L.polyline([[fromLat, fromLon],[toLat, toLon]], { color: '#22c55e', weight: 2, opacity: 0.85 });
+              routeLineLayer.addLayer(seg);
+              boundsPoints.push([fromLat, fromLon], [toLat, toLon]);
+            }
+          }
+        });
+        html += '</tbody></table>';
+        setInfo(html);
+        if (boundsPoints.length > 0){
+          var b = L.latLngBounds(boundsPoints);
+          flyToWorldThen(function(){ flyToBounds(b, 8); });
+        }
+      })
+      .catch(function(err){
+        setInfoError(err && err.message ? err.message : 'Request failed.');
+      });
+  });
   document.getElementById('op-upload-btn').addEventListener('click', function(){
     var fileInput = document.getElementById('op-upload-file');
     if (!fileInput || !fileInput.files || fileInput.files.length === 0){ setInfo('<p class="error">Choose a CSV file first.</p>'); return; }
@@ -1781,6 +1849,55 @@ tr:hover { background: #e0f2fe; }
             err["error"] = std::string(e.what());
             return crow::response(400, err);
         }
+    });
+
+    // ----- API: routes for an airline to/from a specific airport -----
+    CROW_ROUTE(app, "/api/airline_routes/<string>/<string>")
+    ([&db](const std::string& airline_code_in, const std::string& airport_code_in){
+        std::string airline = airline_code_in;
+        std::string airport = airport_code_in;
+        std::transform(airline.begin(), airline.end(), airline.begin(), ::toupper);
+        std::transform(airport.begin(), airport.end(), airport.begin(), ::toupper);
+
+        const Airline* al = db->airline_by_iata(airline);
+        const Airport* ap = db->airport_by_iata(airport);
+
+        std::vector<crow::json::wvalue> routes_json;
+        for (const Route& r : db->routes) {
+            if (r.airline_code != airline) continue;
+            bool touches = false;
+            if (!r.src_airport.empty() && r.src_airport == airport) touches = true;
+            if (!r.dest_airport.empty() && r.dest_airport == airport) touches = true;
+            if (!touches) continue;
+
+            crow::json::wvalue j;
+            j["airline"] = r.airline_code;
+            j["src"] = r.src_airport;
+            j["dest"] = r.dest_airport;
+            j["stops"] = r.stops;
+            j["codeshare"] = r.codeshare;
+
+            const Airport* srcAp = db->airport_by_iata(r.src_airport);
+            const Airport* dstAp = db->airport_by_iata(r.dest_airport);
+            if (srcAp) {
+                j["src_lat"] = srcAp->lat;
+                j["src_lon"] = srcAp->lon;
+            }
+            if (dstAp) {
+                j["dest_lat"] = dstAp->lat;
+                j["dest_lon"] = dstAp->lon;
+            }
+            routes_json.push_back(std::move(j));
+            if (routes_json.size() >= 200) break;
+        }
+
+        crow::json::wvalue out;
+        out["airline"] = airline;
+        out["airline_name"] = al ? al->name : "";
+        out["airport"] = airport;
+        out["airport_name"] = ap ? ap->name : "";
+        out["routes"] = std::move(routes_json);
+        return crow::response(200, out);
     });
 
     // ----- Admin APIs: in-memory airport add/update/delete/redact -----
